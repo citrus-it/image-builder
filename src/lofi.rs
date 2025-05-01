@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 use anyhow::{bail, Context, Result};
@@ -246,12 +246,30 @@ pub fn lofi_map<P: AsRef<Path>>(file: P, label: bool) -> Result<LofiDevice> {
 
     let lofi = LofiDevice::from_ioctl(&li);
 
-    make_devlinks();
-    if let Some(devpath) = lofi.devpath.as_ref() {
-        wait_for_device(devpath)?;
+    /*
+     * Build a list of paths that we need to check for to know the device is
+     * completely mapped and available:
+     */
+    let devs = [lofi.devpath.as_deref(), lofi.rdevpath.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+    /*
+     * Do an initial stat to look for the paths.  If they are present, we can
+     * just return straight away.
+     */
+    if devs.iter().all(|dev| check_for_device(*dev).is_ok()) {
+        return Ok(lofi);
     }
-    if let Some(rdevpath) = lofi.rdevpath.as_ref() {
-        wait_for_device(rdevpath)?;
+
+    /*
+     * Otherwise, perform the more expensive series of operations that
+     * lofiadm(8) would perform in this case:
+     */
+    make_devlinks();
+    for dev in devs {
+        wait_for_device(dev)?;
     }
 
     Ok(lofi)
@@ -314,13 +332,22 @@ fn make_devlinks() {
     }
 }
 
-fn wait_for_device<P: AsRef<Path>>(dev: P) -> Result<()> {
+fn check_for_device<P: AsRef<Path>>(dev: P) -> Result<()> {
     let p = CString::new(dev.as_ref().as_os_str().as_bytes()).unwrap();
 
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
 
+    if unsafe { libc::stat(p.as_ptr(), &mut st) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+
+    bail!("could not stat {:?}: {err}", dev.as_ref());
+}
+
+fn wait_for_device<P: AsRef<Path>>(dev: P) -> Result<()> {
     for _ in 0..=30 {
-        if unsafe { libc::stat(p.as_ptr(), &mut st) } == 0 {
+        if check_for_device(dev.as_ref()).is_ok() {
             return Ok(());
         }
 
