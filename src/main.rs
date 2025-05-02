@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 Oxide Computer Company
+ * Copyright 2025 Oxide Computer Company
  */
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -3303,16 +3303,73 @@ fn run_steps(ib: &mut ImageBuilder) -> Result<()> {
                 struct PkgSetPublisherArgs {
                     publisher: String,
                     uri: Option<String>,
+                    uris: Option<Vec<String>>,
                     mirror_uri: Option<String>,
+                    mirror_uris: Option<Vec<String>>,
                 }
 
                 let a: PkgSetPublisherArgs = step.args()?;
                 let mp = ib.root()?;
                 let publisher = ib.expand(&a.publisher)?;
-                let uri = ib.expando(a.uri.as_deref())?;
-                let mirror_uri = ib.expando(a.mirror_uri.as_deref())?;
 
-                if uri.is_none() && mirror_uri.is_none() {
+                /*
+                 * We want to accept either the original single-value "uri"
+                 * property, or the "uris" multi-value version.
+                 */
+                let uris = if let Some(uri) = ib.expando(a.uri.as_deref())? {
+                    if a.uris.is_some() {
+                        bail!("specify at most one of \"uri\" and \"uris\"");
+                    }
+
+                    Some(vec![uri])
+                } else if let Some(uris) = &a.uris {
+                    if a.uri.is_some() {
+                        bail!("specify at most one of \"uri\" and \"uris\"");
+                    }
+
+                    /*
+                     * Expand the "uris" list.  This may end up being empty,
+                     * which is different in a subtle way from not being
+                     * provided: if empty, we will remove all existing origins
+                     * and not add any back; if not provided, we won't touch
+                     * origins at all.
+                     */
+                    Some(ib.expandm(&uris)?)
+                } else {
+                    None
+                };
+
+                /*
+                 * We want to accept either the original single-value
+                 * "mirror_uri" property, or the "mirror_uris" multi-value
+                 * version.  This, and all other handling, is analogous to
+                 * that for "uri" and "uris".
+                 */
+                let mirror_uris = if let Some(mirror_uri) =
+                    ib.expando(a.mirror_uri.as_deref())?
+                {
+                    if a.mirror_uris.is_some() {
+                        bail!(
+                            "specify at most one of \"mirror_uri\" and \
+                            \"mirror_uris\""
+                        );
+                    }
+
+                    Some(vec![mirror_uri])
+                } else if let Some(mirror_uris) = &a.mirror_uris {
+                    if a.mirror_uri.is_some() {
+                        bail!(
+                            "specify at most one of \"mirror_uri\" and \
+                            \"mirror_uris\""
+                        );
+                    }
+
+                    Some(ib.expandm(&mirror_uris)?)
+                } else {
+                    None
+                };
+
+                if uris.is_none() && mirror_uris.is_none() {
                     bail!("specify at least one of \"uri\" and \"mirror_uri\"");
                 }
 
@@ -3323,12 +3380,37 @@ fn run_steps(ib: &mut ImageBuilder) -> Result<()> {
                     "--no-refresh",
                 ];
 
-                if let Some(uri) = uri.as_deref() {
-                    args.push("-O");
-                    args.push(uri);
+                if let Some(uris) = uris.as_deref() {
+                    match uris {
+                        [uri] => {
+                            /*
+                             * If we have exactly one origin, use the atomic -O
+                             * option to remove all existing origins and insert
+                             * our single URI:
+                             */
+                            args.push("-O");
+                            args.push(uri);
+                        }
+                        uris => {
+                            /*
+                             * Otherwise, remove all existing origins:
+                             */
+                            args.push("-G");
+                            args.push("*");
+
+                            /*
+                             * Then, if any origins were specified, add those
+                             * back:
+                             */
+                            for uri in uris.iter() {
+                                args.push("-g");
+                                args.push(uri);
+                            }
+                        }
+                    }
                 }
 
-                if let Some(mirror_uri) = mirror_uri.as_deref() {
+                if let Some(mirror_uris) = mirror_uris.as_deref() {
                     /*
                      * We want to set the mirror URI, but there is only an
                      * option to add another mirror.  Before we add our mirror,
@@ -3337,8 +3419,10 @@ fn run_steps(ib: &mut ImageBuilder) -> Result<()> {
                     args.push("-M");
                     args.push("*");
 
-                    args.push("-m");
-                    args.push(mirror_uri);
+                    for mirror_uri in mirror_uris.iter() {
+                        args.push("-m");
+                        args.push(mirror_uri);
+                    }
                 }
 
                 args.push(&publisher);
